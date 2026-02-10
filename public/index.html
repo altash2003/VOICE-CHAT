@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Dice</title>
+    <style>
+        body { font-family: 'Courier New', Courier, monospace; background: #1e1e1e; color: #eee; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+        
+        #game-board { background: #2c2c2c; padding: 20px; border-radius: 12px; border: 1px solid #444; width: 90%; max-width: 400px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        
+        h2 { margin-top: 0; color: #ffcc00; }
+
+        /* Dice Styles */
+        .dice-box { display: flex; justify-content: center; gap: 15px; margin: 20px 0; }
+        .die { width: 60px; height: 60px; background: #eee; color: #222; font-size: 32px; font-weight: bold; display: flex; align-items: center; justify-content: center; border-radius: 8px; box-shadow: inset 0 0 10px #999; }
+
+        /* Buttons */
+        button { width: 100%; padding: 15px; margin-top: 10px; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        
+        #btn-roll { background: #007bff; color: white; }
+        #btn-roll:active { transform: scale(0.98); background: #0056b3; }
+
+        /* PTT Button */
+        #btn-ptt { background: #28a745; color: white; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+        #btn-ptt.talking { background: #dc3545; animation: pulse 0.8s infinite; }
+        
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+
+        /* Logs */
+        #log { margin-top: 15px; height: 150px; overflow-y: auto; text-align: left; background: #111; padding: 10px; border-radius: 6px; font-size: 13px; border: 1px solid #333; }
+        .log-voice { color: #ffc107; font-style: italic; }
+        .log-roll { color: #00d2ff; }
+        
+        #status { font-size: 12px; color: #888; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+
+    <div id="game-board">
+        <h2>🎲 CASINO DICE</h2>
+        <div id="status">Tap anywhere to initialize Audio</div>
+
+        <div class="dice-box">
+            <div id="d1" class="die">-</div>
+            <div id="d2" class="die">-</div>
+        </div>
+
+        <button id="btn-roll">ROLL DICE</button>
+        <br><br>
+        <button id="btn-ptt">HOLD TO TALK</button>
+
+        <div id="log"></div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        
+        // Elements
+        const d1 = document.getElementById('d1');
+        const d2 = document.getElementById('d2');
+        const log = document.getElementById('log');
+        const btnRoll = document.getElementById('btn-roll');
+        const btnPtt = document.getElementById('btn-ptt');
+        const statusEl = document.getElementById('status');
+
+        let mediaRecorder;
+        let audioChunks = [];
+
+        // --- DICE LOGIC ---
+        btnRoll.addEventListener('click', () => {
+            socket.emit('roll-dice');
+        });
+
+        socket.on('dice-result', (data) => {
+            d1.textContent = data.die1;
+            d2.textContent = data.die2;
+            addLog(`Player ${data.player} rolled ${data.total}`, 'log-roll');
+        });
+
+        // --- AUDIO LOGIC ---
+        
+        // 1. Initialize Mic (Must be triggered by user interaction first)
+        async function initAudio() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+
+                mediaRecorder.addEventListener("dataavailable", event => {
+                    audioChunks.push(event.data);
+                });
+
+                mediaRecorder.addEventListener("stop", () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    socket.emit('voice-message', audioBlob);
+                    audioChunks = [];
+                });
+
+                statusEl.textContent = "● Audio Ready. Hold Green Button to Talk.";
+                statusEl.style.color = "#28a745";
+            } catch (err) {
+                console.error(err);
+                statusEl.textContent = "❌ Mic Permission Denied. Check settings.";
+                statusEl.style.color = "red";
+            }
+        }
+
+        // Initialize on first click anywhere
+        document.body.addEventListener('click', () => {
+            if (!mediaRecorder) initAudio();
+        }, { once: true });
+
+
+        // 2. PTT Logic
+        const startRecording = () => {
+            if (mediaRecorder && mediaRecorder.state === "inactive") {
+                mediaRecorder.start();
+                btnPtt.classList.add('talking');
+                btnPtt.innerText = "TRANSMITTING...";
+            }
+        };
+
+        const stopRecording = () => {
+            if (mediaRecorder && mediaRecorder.state === "recording") {
+                mediaRecorder.stop();
+                btnPtt.classList.remove('talking');
+                btnPtt.innerText = "HOLD TO TALK";
+            }
+        };
+
+        // Mouse Events
+        btnPtt.addEventListener('mousedown', startRecording);
+        btnPtt.addEventListener('mouseup', stopRecording);
+        btnPtt.addEventListener('mouseleave', stopRecording);
+        
+        // Touch Events (Mobile)
+        btnPtt.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); });
+        btnPtt.addEventListener('touchend', (e) => { e.preventDefault(); stopRecording(); });
+
+
+        // 3. Play Incoming Audio
+        socket.on('play-voice', (data) => {
+            const audioBlob = new Blob([data.audio], { type: 'audio/webm' });
+            const audioUrl = URL.createObjectURL(audioBlob);
+            const audio = new Audio(audioUrl);
+            audio.play();
+            addLog(`🎤 Player ${data.id.substr(0,4)} says something...`, 'log-voice');
+        });
+
+        function addLog(msg, className) {
+            const div = document.createElement('div');
+            div.textContent = msg;
+            if(className) div.classList.add(className);
+            log.prepend(div);
+        }
+    </script>
+</body>
+</html>
